@@ -1,154 +1,153 @@
-import os
+# -*- coding: utf-8 -*-
+import PyPDF2
+from docx import Document
+import json
 import re
-import docx
-from PyPDF2 import PdfReader
-import glob
+import os
+import sys
+from typing import List, Dict
 
-def clean_text(text):
-    """
-    Cleans text by removing NULL bytes, control characters, and normalizing whitespace.
-    
-    Args:
-        text (str): Text to clean
-        
-    Returns:
-        str: Cleaned text
-    """
-    # Remove NULL bytes and control characters
-    cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\xff]', ' ', text)
-    # Normalize whitespace
-    cleaned = ' '.join(cleaned.split())
-    return cleaned.strip()
+# Fix console encoding for Windows
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
 
-def extract_backlash_content(pdf_directory):
-    """
-    Scans a folder of PDF files and extracts content related to "backlash"
-    
-    Args:
-        pdf_directory (str): Path to the directory containing PDF files
-        
-    Returns:
-        dict: Dictionary of results with filenames as keys and lists of relevant text as values
-    """
-    results = {}
-    
-    # Get all PDF files in the specified directory
-    pdf_files = glob.glob(os.path.join(pdf_directory, "*.pdf"))
-    
-    for pdf_path in pdf_files:
-        filename = os.path.basename(pdf_path)
-        print(f"Processing {filename}...")
-        
-        try:
-            reader = PdfReader(pdf_path)
-            text_content = ""
-            
-            # Extract text from all pages
+def clean_text(text: str) -> str:
+    """Clean text from invalid XML characters and normalize spaces"""
+    if not text:
+        return ""
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
+    text = text.replace('\x0b', ' ').replace('\x0c', ' ')
+    text = text.replace('\u0643', '\u06a9')  # ك to ک
+    text = text.replace('\u0649', '\u06cc')  # ى to ی
+    return text.strip()
+
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """Extract text from PDF file while preserving paragraph structure"""
+    text = ""
+    try:
+        with open(pdf_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
             for page in reader.pages:
                 page_text = page.extract_text()
-                if page_text:  # Only add if text was extracted
-                    text_content += clean_text(page_text) + "\n"
-                
-            # Find all paragraphs containing the word "backlash"
-            # Paragraphs are separated by blank lines
-            paragraphs = re.split(r'\n\s*\n', text_content)
-            
-            backlash_paragraphs = []
-            for paragraph in paragraphs:
-                if re.search(r'\bbacklash\b', paragraph, re.IGNORECASE):
-                    # Clean and add the paragraph
-                    clean_paragraph = clean_text(paragraph)
-                    if clean_paragraph:  # Only add if there's content
-                        backlash_paragraphs.append(clean_paragraph)
-            
-            if backlash_paragraphs:
-                results[filename] = backlash_paragraphs
-                
-        except Exception as e:
-            print(f"Error processing {filename}: {str(e)}")
-    
+                if page_text:
+                    text += clean_text(page_text) + "\n\n"
+    except Exception as e:
+        print(f"Error reading PDF file: {str(e)}")
+    return text
+
+def split_into_paragraphs(text: str) -> List[str]:
+    """Group lines into paragraphs separated by empty lines"""
+    lines = text.splitlines()
+    paragraphs = []
+    current = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped == '':
+            if current:
+                paragraphs.append(' '.join(current))
+                current = []
+        else:
+            current.append(stripped)
+
+    if current:
+        paragraphs.append(' '.join(current))
+
+    return paragraphs
+
+def find_backlash_paragraphs(text: str) -> List[Dict]:
+    """Find all paragraphs containing the word 'backlash'"""
+    paragraphs = split_into_paragraphs(text)
+
+    results = []
+    for i, para in enumerate(paragraphs, 1):
+        if re.search(r'\bbacklash\b', para, re.IGNORECASE):
+            sentences = re.split(r'(?<=[.!?]) +', para)
+            relevant_sentences = [clean_text(s) for s in sentences 
+                                  if re.search(r'\bbacklash\b', s, re.IGNORECASE)]
+            results.append({
+                "id": i,
+                "paragraph": clean_text(para),
+                "sentences": relevant_sentences,
+                "full_paragraph": clean_text(para)
+            })
     return results
 
-def save_to_word(results, output_file):
-    """
-    Saves the results to a Word document
-    
-    Args:
-        results (dict): Dictionary containing the extracted content
-        output_file (str): Path to the output Word file
-    """
-    doc = docx.Document()
-    
-    # Add a title
-    doc.add_heading('Backlash Content Extraction Results', 0)
-    
-    # If no results were found
-    if not results:
-        doc.add_paragraph('No content related to "backlash" was found in any of the PDF files.')
-    
-    # Add the results from each file
-    for filename, paragraphs in results.items():
-        # Add a heading for the file
-        doc.add_heading(f'File: {filename}', level=1)
-        
-        # Add each paragraph containing "backlash"
-        for i, paragraph in enumerate(paragraphs, 1):
-            doc.add_heading(f'Match {i}:', level=2)
-            
-            # Create a new paragraph for the content
-            p = doc.add_paragraph()
-            
-            # Split the paragraph to highlight "backlash" occurrences
-            parts = re.split(r'(\bbacklash\b)', paragraph, flags=re.IGNORECASE)
-            
-            for j, part in enumerate(parts):
-                if part:  # Only add if part is not empty
-                    if j % 2 == 1:  # This is a "backlash" match
-                        p.add_run(part).bold = True
-                    else:
-                        p.add_run(part)
-            
-            # Add a separator between matches
-            if i < len(paragraphs):
-                doc.add_paragraph('-' * 50)
-    
-    # Save the document
+def save_to_word(occurrences: List[Dict], output_path: str):
+    doc = Document()
+    doc.add_heading('گزارش پاراگراف‌های حاوی کلمه Backlash', 0)
+
+    if not occurrences:
+        doc.add_paragraph("هیچ پاراگرافی حاوی کلمه 'backlash' در سند پیدا نشد.")
+        doc.save(output_path)
+        return
+
+    doc.add_paragraph(f"تعداد {len(occurrences)} پاراگراف حاوی کلمه 'backlash' پیدا شد:\n")
+
+    for item in occurrences:
+        try:
+            doc.add_paragraph(f"پاراگراف شماره #{item['id']}:", style='Heading 2')
+            doc.add_paragraph(item['paragraph'])
+            doc.add_paragraph("جملات مرتبط:", style='Heading 3')
+            for sent in item['sentences']:
+                doc.add_paragraph(f"- {sent}")
+            doc.add_paragraph()
+        except Exception as e:
+            print(f"Error saving paragraph {item['id']}: {str(e)}")
+            continue
+
     try:
-        doc.save(output_file)
-        print(f"Results successfully saved to {output_file}")
+        doc.save(output_path)
     except Exception as e:
-        print(f"Error saving Word document: {str(e)}")
+        print(f"Error saving Word file: {str(e)}")
+        raise
+
+def save_to_json(occurrences: List[Dict], output_path: str):
+    try:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "search_term": "backlash",
+                "total_paragraphs": len(occurrences),
+                "paragraphs": [ {
+                    "id": item["id"],
+                    "full_paragraph": item["full_paragraph"],
+                    "sentences": item["sentences"]
+                } for item in occurrences ]
+            }, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error saving JSON file: {str(e)}")
+        raise
 
 def main():
-    # Get input from user
-    pdf_directory = r"D:\extract-content-from-file\inputs"
-    output_file = r"D:\extract-content-from-file\outputs\output.docx"
-    
-    # Create output directory if it doesn't exist
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    
-    # Validate directory
-    if not os.path.isdir(pdf_directory):
-        print(f"Error: Directory '{pdf_directory}' does not exist.")
+    pdf_path = "./inputs/Cylindrical_Gears_Calculation_Materials_Manufacturing_2016_Linke.pdf"
+
+    if not os.path.exists(pdf_path):
+        print("Error: PDF file not found.")
         return
-    
-    # Extract content from PDFs
-    print("Starting extraction process...")
-    results = extract_backlash_content(pdf_directory)
-    
-    # Report results
-    total_files = len(glob.glob(os.path.join(pdf_directory, "*.pdf")))
-    files_with_matches = len(results)
-    
-    print(f"\nExtraction complete!")
-    print(f"Examined {total_files} PDF files")
-    print(f"Found matches in {files_with_matches} files")
-    
-    # Save results to Word document
-    if results:
-        save_to_word(results, output_file)
-    else:
-        print("No content related to 'backlash' was found in any of the PDF files.")
+
+    base_dir = os.path.dirname(pdf_path)
+    file_name = os.path.splitext(os.path.basename(pdf_path))[0]
+    word_output = os.path.join(base_dir, f"{file_name}_backlash_paragraphs.docx")
+    json_output = os.path.join(base_dir, f"{file_name}_backlash_paragraphs.json")
+
+    try:
+        print("Extracting text from PDF...")
+        text = extract_text_from_pdf(pdf_path)
+
+        print("Searching for 'backlash'...")
+        occurrences = find_backlash_paragraphs(text)
+
+        print("Saving results...")
+        save_to_word(occurrences, word_output)
+        save_to_json(occurrences, json_output)
+
+        print("\nProcessing completed successfully:")
+        print(f"- Found {len(occurrences)} paragraphs containing 'backlash'")
+        print(f"- Word report saved to: {word_output}")
+        print(f"- JSON report saved to: {json_output}")
+
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
 
 if __name__ == "__main__":
     main()

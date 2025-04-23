@@ -1,30 +1,44 @@
 import json
 import os
-from deep_translator import GoogleTranslator
 from docx import Document
-import textwrap
 import sys
+import subprocess
 
 # Ensure UTF-8 for Windows terminal
 if sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
 
 def translate_to_persian(text):
+    """Translate English text to Persian using Mistral model via Ollama."""
     try:
-        if len(text) <= 5000:
-            return GoogleTranslator(source='auto', target='fa').translate(text)
-        else:
-            # Split long text into safe chunks
-            chunks = textwrap.wrap(text, 4500)
-            translated_chunks = [
-                GoogleTranslator(source='auto', target='fa').translate(chunk)
-                for chunk in chunks
-            ]
-            return ' '.join(translated_chunks)
+        # Create prompt with special instructions for technical terms
+        prompt = f"""Please translate the following English text to Persian.
+        Keep technical terms like 'backlash', 'gear' etc. in English:
+        
+        {text}
+        
+        Translation:"""
+
+        # Run Ollama command
+        result = subprocess.run(
+            ['ollama', 'run', 'mistral', prompt],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+
+        # Get the translated text
+        translated = result.stdout.strip()
+        
+        # Basic validation
+        if not translated:
+            return text
+            
+        return translated
+
     except Exception as e:
-        safe_text = text[:40].encode('utf-8', errors='ignore').decode('utf-8')
-        print(f"⚠️ Error translating: {safe_text}... => {e}")
-        return text  # Return original if translation fails
+        print(f" Translation error: {str(e)[:100]}...")
+        return text
 
 def translate_backlash_json(json_input_path, output_dir):
     with open(json_input_path, 'r', encoding='utf-8') as f:
@@ -67,7 +81,7 @@ def translate_backlash_json(json_input_path, output_dir):
     word_out_path = os.path.join(output_dir, f"{base_name}_translated.docx")
     doc.save(word_out_path)
 
-    print(f"✅ Translations saved:\n- {json_out_path}\n- {word_out_path}")
+    print(f" Translations saved:\n- {json_out_path}\n- {word_out_path}")
 
 # Example usage
 if __name__ == "__main__":
